@@ -20,7 +20,7 @@ public class AsyncLogInterfaceTests
         {
             var logger = new AsyncLogInterface(logDir.FullName);
             logger.WriteLog(message);
-            logger.Stop_With_Flush();
+            logger.StopAndFlush();
 
             // Stop_With_Flush is not currently synchronous; poll until the line lands or we time out.
             var deadline = DateTime.UtcNow.AddSeconds(5);
@@ -80,7 +80,7 @@ public class AsyncLogInterfaceTests
             fakeTime.Advance(TimeSpan.FromSeconds(2));
             logger.WriteLog(afterMidnight);
 
-            logger.Stop_With_Flush();
+            logger.StopAndFlush();
 
             WaitUntil(() => AnyFileContains(logDir, afterMidnight), TimeSpan.FromSeconds(5));
 
@@ -136,7 +136,7 @@ public class AsyncLogInterfaceTests
             foreach (var th in threads) th.Start();
             foreach (var th in threads) th.Join();
 
-            logger.Stop_With_Flush();
+            logger.StopAndFlush();
 
             // Stop_With_Flush still returns before drain finishes (test #3 territory), so poll
             // until the file has enough lines to cover every produced message.
@@ -158,6 +158,78 @@ public class AsyncLogInterfaceTests
             Assert.True(
                 missing.Count == 0,
                 $"{missing.Count}/{totalMessages} messages missing. First few: {string.Join(", ", missing.Take(10))}");
+        }
+        finally
+        {
+            if (logDir.Exists)
+                Directory.Delete(logDir.FullName, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Stop_With_Flush_BlocksUntilAllOutstandingLogsAreWritten()
+    {
+        // README requirement #3 (drain variant): the call must not return until every
+        // queued log has been written. We burst-enqueue so the consumer has a real
+        // backlog to drain, then read the file with NO polling — if Stop_With_Flush
+        // is honoring its contract, every message is already on disk.
+        const int messageCount = 1000;
+
+        var logDir = new DirectoryInfo(
+            Path.Combine(Path.GetTempPath(), "LogComponentTests_" + Guid.NewGuid().ToString("N")));
+
+        try
+        {
+            var logger = new AsyncLogInterface(logDir.FullName);
+
+            for (int i = 0; i < messageCount; i++)
+                logger.WriteLog($"flush-line-{i}");
+
+            logger.StopAndFlush();
+
+            // No WaitUntil here — the contract is "call returns when drain is done."
+            logDir.Refresh();
+            var file = logDir.GetFiles("*.log").Single();
+            var content = ReadAll(file);
+            var actualLines = content.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length - 1;
+
+            Assert.Equal(messageCount, actualLines);
+        }
+        finally
+        {
+            if (logDir.Exists)
+                Directory.Delete(logDir.FullName, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Stop_Without_Flush_DiscardsOutstandingLogs()
+    {
+        // README requirement #3 (immediate-stop variant): outstanding logs are discarded.
+        // Burst-enqueue many messages so the queue still has items when we call stop,
+        // then assert the file contains fewer lines than were produced.
+        const int messageCount = 1000;
+
+        var logDir = new DirectoryInfo(
+            Path.Combine(Path.GetTempPath(), "LogComponentTests_" + Guid.NewGuid().ToString("N")));
+
+        try
+        {
+            var logger = new AsyncLogInterface(logDir.FullName);
+
+            for (int i = 0; i < messageCount; i++)
+                logger.WriteLog($"noflush-line-{i}");
+
+            logger.StopAndDiscard();
+
+            // After Stop_Without_Flush returns, the consumer thread is fully stopped
+            // and the file is in a stable state (the call Joins the thread).
+            logDir.Refresh();
+            var file = logDir.GetFiles("*.log").Single();
+            var content = ReadAll(file);
+            var actualLines = content.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length - 1;
+
+            Assert.InRange(actualLines, 0, messageCount - 1);
         }
         finally
         {

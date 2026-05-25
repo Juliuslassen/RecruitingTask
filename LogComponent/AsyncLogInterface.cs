@@ -1,114 +1,138 @@
-﻿namespace LogTest
+namespace LogTest
 {
 	using System;
-	using System.Collections.Generic;
+	using System.Collections.Concurrent;
 	using System.IO;
 	using System.Text;
 	using System.Threading;
 
 	public class AsyncLogInterface : LogInterface
 	{
-		private Thread _runThread;
-		private List<LogLine> _lines = new List<LogLine>();
-
+		private readonly string _logDirectory;
+		private readonly TimeProvider _timeProvider;
+		private readonly BlockingCollection<LogLine> _lines = new BlockingCollection<LogLine>();
+		private readonly CancellationTokenSource _cts = new CancellationTokenSource();
+		private readonly Thread _runThread;
 		private StreamWriter _writer;
+		private DateTime _curDate;
 
-		private bool _exit;
-
-		public AsyncLogInterface()
+		public AsyncLogInterface(string logDirectory, TimeProvider? timeProvider = null)
 		{
-			if (!Directory.Exists(@"./LogTest"))
-				Directory.CreateDirectory(@"./LogTest");
+			if (string.IsNullOrWhiteSpace(logDirectory))
+				throw new ArgumentException("Log directory must be provided.", nameof(logDirectory));
 
-			this._writer = File.AppendText(@"./LogTest/Log" + DateTime.Now.ToString("yyyyMMdd HHmmss fff") + ".log");
+			this._logDirectory = logDirectory;
+			this._timeProvider = timeProvider ?? TimeProvider.System;
 
-			this._writer.Write("Timestamp".PadRight(25, ' ') + "\t" + "Data".PadRight(15, ' ') + "\t" + Environment.NewLine);
+			if (!Directory.Exists(this._logDirectory))
+				Directory.CreateDirectory(this._logDirectory);
 
-			this._writer.AutoFlush = true;
+			this._curDate = this._timeProvider.GetLocalNow().DateTime;
+			this._writer = OpenNewWriter();
 
-			this._runThread = new Thread(this.MainLoop);
+			this._runThread = new Thread(this.MainLoop) { IsBackground = true };
 			this._runThread.Start();
-		}
-
-		private bool _QuitWithFlush = false;
-
-
-		DateTime _curDate = DateTime.Now;
-
-		private void MainLoop()
-		{
-			while (!this._exit)
-			{
-				if (this._lines.Count > 0)
-				{
-					int f = 0;
-					List<LogLine> _handled = new List<LogLine>();
-
-					foreach (LogLine logLine in this._lines)
-					{
-						f++;
-
-						if (f > 5)
-							continue;
-
-						if (!this._exit || this._QuitWithFlush)
-						{
-							_handled.Add(logLine);
-
-							StringBuilder stringBuilder = new StringBuilder();
-
-							if ((DateTime.Now - _curDate).Days != 0)
-							{
-								_curDate = DateTime.Now;
-
-								this._writer = File.AppendText(@"./LogTest/Log" + DateTime.Now.ToString("yyyyMMdd HHmmss fff") + ".log");
-
-								this._writer.Write("Timestamp".PadRight(25, ' ') + "\t" + "Data".PadRight(15, ' ') + "\t" + Environment.NewLine);
-
-								stringBuilder.Append(Environment.NewLine);
-
-								this._writer.Write(stringBuilder.ToString());
-
-								this._writer.AutoFlush = true;
-							}
-
-							stringBuilder.Append(logLine.Timestamp.ToString("yyyy-MM-dd HH:mm:ss:fff"));
-							stringBuilder.Append("\t");
-							stringBuilder.Append(logLine.LineText());
-							stringBuilder.Append("\t");
-
-							stringBuilder.Append(Environment.NewLine);
-
-							this._writer.Write(stringBuilder.ToString());
-						}
-					}
-
-					for (int y = 0; y < _handled.Count; y++)
-					{
-						this._lines.Remove(_handled[y]);
-					}
-
-					if (this._QuitWithFlush == true && this._lines.Count == 0)
-						this._exit = true;
-
-					Thread.Sleep(50);
-				}
-			}
-		}
-
-		public void Stop_Without_Flush()
-		{
-			this._exit = true;
-		}
-
-		public void Stop_With_Flush()
-		{
-			this._QuitWithFlush = true;
 		}
 
 		public void WriteLog(string s)
 		{
-			this._lines.Add(new LogLine() {Text = s, Timestamp = DateTime.Now});
+			if (this._lines.IsAddingCompleted)
+				return;
+
+			try
+			{
+				this._lines.Add(new LogLine { Text = s, Timestamp = this._timeProvider.GetLocalNow().DateTime });
+			}
+			catch (InvalidOperationException)
+			{
+				// CompleteAdding was called between the check above and Add — drop silently.
+			}
+		}
+
+		public void StopAndDiscard()
+		{
+			this._lines.CompleteAdding();
+			this._cts.Cancel();
+			this._runThread.Join();
+		}
+
+		public void StopAndFlush()
+		{
+			this._lines.CompleteAdding();
+			this._runThread.Join();
+		}
+
+		private void MainLoop()
+		{
+			try
+			{
+				foreach (LogLine logLine in this._lines.GetConsumingEnumerable(this._cts.Token))
+				{
+					TryProcessLogLine(logLine);
+				}
+			}
+			catch (OperationCanceledException)
+			{
+				// StopAndDiscard — outstanding logs are dropped as the contract requires.
+			}
+			finally
+			{
+				this._writer.Dispose();
+			}
+		}
+
+		private void TryProcessLogLine(LogLine logLine)
+		{
+			try
+			{
+				RotateWriterIfDateChanged();
+				WriteFormattedLine(logLine);
+			}
+			catch (Exception ex)
+			{
+				// Requirement #4: a failed write must not take down the consumer thread.
+				// Losing this one line is preferable to silently losing every line that follows.
+				Console.Error.WriteLine(
+					$"AsyncLogInterface: dropping log line — {ex.GetType().Name}: {ex.Message}");
+			}
+		}
+
+		private void RotateWriterIfDateChanged()
+		{
+			DateTime now = this._timeProvider.GetLocalNow().DateTime;
+			if (now.Date == this._curDate.Date) return;
+
+			// Open the new writer before disposing the old one, so a failure here
+			// leaves us with a working writer rather than a disposed one.
+			StreamWriter newWriter = OpenNewWriter();
+			StreamWriter oldWriter = this._writer;
+			this._writer = newWriter;
+			this._curDate = now;
+			oldWriter.Dispose();
+		}
+
+		private void WriteFormattedLine(LogLine logLine)
+		{
+			var sb = new StringBuilder();
+			sb.Append(logLine.Timestamp.ToString("yyyy-MM-dd HH:mm:ss:fff"));
+			sb.Append('\t');
+			sb.Append(logLine.LineText());
+			sb.Append('\t');
+			sb.Append(Environment.NewLine);
+
+			this._writer.Write(sb.ToString());
+		}
+
+		private StreamWriter OpenNewWriter()
+		{
+			var path = Path.Combine(
+				this._logDirectory,
+				"Log" + this._timeProvider.GetLocalNow().DateTime.ToString("yyyyMMdd HHmmss fff") + ".log");
+
+			var writer = File.AppendText(path);
+			writer.Write("Timestamp".PadRight(25, ' ') + "\t" + "Data".PadRight(15, ' ') + "\t" + Environment.NewLine);
+			writer.AutoFlush = true;
+			return writer;
 		}
 	}
 }

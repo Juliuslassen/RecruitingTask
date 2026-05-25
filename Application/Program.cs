@@ -1,4 +1,5 @@
-﻿using System;
+using System;
+using System.IO;
 using System.Threading;
 using LogTest;
 
@@ -8,27 +9,54 @@ namespace Application
 	{
 		static void Main(string[] args)
 		{
-			LogInterface logger_flush = new AsyncLogInterface();
+			string logsDirectory = Path.Combine(FindRepoRoot(), "logs");
+
+			RunFlushDemo(logsDirectory);
+			
+			RunDiscardDemo(logsDirectory);
+			
+			Console.ReadLine();
+		}
+
+		private static void RunFlushDemo(string logsDirectory)
+		{
+			LogInterface logger = new AsyncLogInterface(logsDirectory);
 
 			for (int i = 0; i < 15; i++)
 			{
-				logger_flush.WriteLog("Number with Flush: " + i.ToString());
+				logger.WriteLog("Number with Flush: " + i.ToString());
 				Thread.Sleep(50);
 			}
 
-			logger_flush.Stop_With_Flush();
+			logger.StopAndFlush();	
+		}
 
-			LogInterface logger_to_stop_without_flush = new AsyncLogInterface();
+		private static void RunDiscardDemo(string logsDirectory)
+		{
+			LogInterface logger = new AsyncLogInterface(logsDirectory);
 
 			for (int i = 50; i > 0; i--)
 			{
-				logger_to_stop_without_flush.WriteLog("Number with No flush: " + i.ToString());
+				logger.WriteLog("Number with No flush: " + i.ToString());
 				Thread.Sleep(20);
 			}
 
-			logger_to_stop_without_flush.Stop_Without_Flush();
+			logger.StopAndDiscard();	
+		}
+		
 
-			Console.ReadLine();
+		private static string FindRepoRoot()
+		{
+			var dir = new DirectoryInfo(AppContext.BaseDirectory);
+			while (dir is not null)
+			{
+				if (dir.GetFiles("*.sln").Length > 0)
+					return dir.FullName;
+				dir = dir.Parent;
+			}
+
+			throw new InvalidOperationException(
+				"Could not locate repository root (no .sln found walking up from " + AppContext.BaseDirectory + ").");
 		}
 	}
 }

@@ -5,12 +5,12 @@ namespace LogTest
 		/// <summary>
 		/// Stop the logging. If any outstadning logs theses will not be written to Log
 		/// </summary>
-		void Stop_Without_Flush();
+		void StopAndDiscard();
 
 		/// <summary>
 		/// Stop the logging. The call will not return until all all logs have been written to Log.
 		/// </summary>
-		void Stop_With_Flush();
+		void StopAndFlush();
 
 		/// <summary>
 		/// WriteLog a message to the Log.

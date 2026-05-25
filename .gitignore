@@ -350,3 +350,6 @@ MigrationBackup/
 .ionide/
 
 *.idea
+
+# macOS Finder metadata
+.DS_Store
