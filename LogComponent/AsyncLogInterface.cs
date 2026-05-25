@@ -6,7 +6,7 @@ namespace LogTest
 	using System.Text;
 	using System.Threading;
 
-	public class AsyncLogInterface : LogInterface
+	public class AsyncLogInterface : LogInterface, IDisposable
 	{
 		private static int _instanceCounter;
 
@@ -17,6 +17,7 @@ namespace LogTest
 		private readonly Thread _runThread;
 		private readonly int _instanceId = Interlocked.Increment(ref _instanceCounter);
 		private int _stopRequested;
+		private int _disposed;
 
 		// Mutated and read only from the consumer thread (MainLoop).
 		// Not safe to access from any other thread.
@@ -76,6 +77,27 @@ namespace LogTest
 
 			this._lines.CompleteAdding();
 			this._runThread.Join();
+		}
+
+		/// <summary>
+		/// Stops the logger (draining any outstanding logs) and releases the
+		/// queue + cancellation-token resources. Safe to call multiple times.
+		/// Equivalent to <see cref="StopAndFlush"/> followed by disposal of
+		/// internally-owned <see cref="IDisposable"/> fields.
+		/// </summary>
+		public void Dispose()
+		{
+			if (Interlocked.Exchange(ref this._disposed, 1) != 0)
+				return;
+
+			// Idempotent: if the caller already stopped us, this is a no-op
+			// and the thread is already joined.
+			StopAndFlush();
+
+			this._cts.Dispose();
+			this._lines.Dispose();
+
+			GC.SuppressFinalize(this);
 		}
 
 		private void MainLoop()

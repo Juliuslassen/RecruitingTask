@@ -305,6 +305,59 @@ public class AsyncLogInterfaceTests
         }
     }
 
+    [Fact]
+    public void Dispose_FlushesOutstandingLogsAndReleasesResources()
+    {
+        // Using-block usage: Dispose must flush the queue (it calls StopAndFlush
+        // internally) and then release the queue + cancellation-token handles.
+        const string message = "logged inside using block";
+
+        var logDir = new DirectoryInfo(
+            Path.Combine(Path.GetTempPath(), "LogComponentTests_" + Guid.NewGuid().ToString("N")));
+
+        try
+        {
+            using (var logger = new AsyncLogInterface(logDir.FullName))
+            {
+                logger.WriteLog(message);
+            }
+            // Dispose has been called by the using-block exit.
+
+            logDir.Refresh();
+            var file = logDir.GetFiles("*.log").Single();
+            Assert.Contains(message, ReadAll(file));
+        }
+        finally
+        {
+            if (logDir.Exists)
+                Directory.Delete(logDir.FullName, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Dispose_CalledMultipleTimes_DoesNotThrow()
+    {
+        // Disposal is idempotent (Interlocked-gated). Calling Dispose after an
+        // explicit Stop must also be safe.
+        var logDir = new DirectoryInfo(
+            Path.Combine(Path.GetTempPath(), "LogComponentTests_" + Guid.NewGuid().ToString("N")));
+
+        try
+        {
+            var logger = new AsyncLogInterface(logDir.FullName);
+            logger.WriteLog("anything");
+            logger.StopAndFlush();
+
+            logger.Dispose();
+            logger.Dispose();
+        }
+        finally
+        {
+            if (logDir.Exists)
+                Directory.Delete(logDir.FullName, recursive: true);
+        }
+    }
+
     private static int CountLogLines(DirectoryInfo dir)
     {
         dir.Refresh();

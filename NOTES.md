@@ -55,6 +55,14 @@ fix earlier would have meant rewriting the same lines twice.
 - **Log directory injected via constructor.** A library shouldn't depend on
   cwd. Tests use a temp directory per run, which keeps them parallel-safe
   and self-cleaning.
+- **`IDisposable` with the flush-on-dispose pattern.** Originally omitted on
+  the grounds that `Stop_*` covered shutdown; an architecture review surfaced
+  that `_cts` and `_lines` both implement `IDisposable` and were leaking their
+  internal handles per instance. Once `Stop_*` had been made idempotent
+  (`Interlocked` guard), the original rationale no longer held — `Dispose`
+  could safely call `StopAndFlush()` first (idempotent, joins the consumer),
+  then release the queue and cancellation source. Callers can now use `using`
+  blocks; explicit `Stop_*` still works exactly as before.
 
 ## Bugs identified in the inherited code
 
@@ -72,8 +80,6 @@ fix earlier would have meant rewriting the same lines twice.
 
 ## What was deliberately *not* done
 
-- **No `IDisposable` on `AsyncLogInterface`.** The `Stop_*` methods cover
-  shutdown; adding `Dispose` would be redundant API surface for this scope.
 - **No structured logging, levels, sinks, or async write API.** The interface
   is what the README defines; expanding it would conflict with the stated
   contract.
