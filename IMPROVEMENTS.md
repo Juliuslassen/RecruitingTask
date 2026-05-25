@@ -76,7 +76,32 @@ scope.
   and `LogLine`. Modern-C# nit; would save indentation and match the
   test project's style. `namespace LogTest;` instead of
   `namespace LogTest { … }`.
-- **Structured error reporting** for demand #4 (event / callback /
-  `LastError` property) so callers can react to write failures programmatically rather than just by scraping `Console.Error`.
-  See [`NOTES.md`](./NOTES.md) → *"What was deliberately not done"* for
-  why this was left as-is.
+
+## Operational hardening
+
+- **Bounded queue / backpressure policy.** `BlockingCollection<LogLine>`
+  is unbounded today, and `WriteLog` is fire-and-forget — if the disk
+  stalls or a sink jams, the queue grows without limit and the process
+  eats memory until it OOMs. `BlockingCollection`'s constructor takes a
+  `boundedCapacity`, which pushes the policy choice (block the producer,
+  drop-oldest, drop-newest) into a single decision at construction time
+  and doesn't require touching the `LogInterface` contract. A sensible
+  default plus an overload to override it would be enough.
+- **Health / liveness signals on the logger.** Callers have no way to
+  ask whether the consumer thread is still alive, whether writes are
+  still landing, or whether errors have occurred — the only current
+  signal of trouble is a stderr line. Adding `bool IsRunning`,
+  `Exception? LastError`, and an
+  `event EventHandler<LogFailedEventArgs> WriteFailed` would let hosts
+  surface degraded-logger state in their own health checks and react
+  programmatically (alert, switch to a fallback sink) instead of
+  finding out after the fact.
+- **Hidden `Console.Error` coupling.** `TryProcessLogLine`'s demand-#4
+  recovery path writes to `Console.Error.WriteLine(...)`. That's a
+  process-wide static dependency: it couples the library to whoever
+  owns stderr, can't be redirected for tests, and is invisible in hosts
+  that don't surface stderr at all (Windows Service, Azure Function,
+  containerised workloads with stderr discarded). The fix dovetails with
+  the bullet above — once failures are exposed as an event or callback,
+  the library no longer needs to touch `Console` itself, and the host
+  decides where the diagnostic lands.

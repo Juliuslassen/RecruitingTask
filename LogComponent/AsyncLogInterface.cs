@@ -8,12 +8,22 @@ namespace LogTest
 
 	public class AsyncLogInterface : LogInterface
 	{
+		private static int _instanceCounter;
+
 		private readonly string _logDirectory;
 		private readonly TimeProvider _timeProvider;
 		private readonly BlockingCollection<LogLine> _lines = new BlockingCollection<LogLine>();
 		private readonly CancellationTokenSource _cts = new CancellationTokenSource();
 		private readonly Thread _runThread;
+		private readonly int _instanceId = Interlocked.Increment(ref _instanceCounter);
+		private int _stopRequested;
+
+		// Mutated and read only from the consumer thread (MainLoop).
+		// Not safe to access from any other thread.
 		private StreamWriter _writer;
+
+		// Mutated and read only from the consumer thread (MainLoop).
+		// Not safe to access from any other thread.
 		private DateTime _curDate;
 
 		public AsyncLogInterface(string logDirectory, TimeProvider? timeProvider = null)
@@ -51,6 +61,9 @@ namespace LogTest
 
 		public void StopAndDiscard()
 		{
+			if (Interlocked.Exchange(ref this._stopRequested, 1) != 0)
+				return;
+
 			this._lines.CompleteAdding();
 			this._cts.Cancel();
 			this._runThread.Join();
@@ -58,6 +71,9 @@ namespace LogTest
 
 		public void StopAndFlush()
 		{
+			if (Interlocked.Exchange(ref this._stopRequested, 1) != 0)
+				return;
+
 			this._lines.CompleteAdding();
 			this._runThread.Join();
 		}
@@ -127,7 +143,8 @@ namespace LogTest
 		{
 			var path = Path.Combine(
 				this._logDirectory,
-				"Log" + this._timeProvider.GetLocalNow().DateTime.ToString("yyyyMMdd HHmmss fff") + ".log");
+				"Log" + this._timeProvider.GetLocalNow().DateTime.ToString("yyyyMMdd HHmmss fff")
+					+ "_" + this._instanceId.ToString() + ".log");
 
 			var writer = File.AppendText(path);
 			writer.Write("Timestamp".PadRight(25, ' ') + "\t" + "Data".PadRight(15, ' ') + "\t" + Environment.NewLine);

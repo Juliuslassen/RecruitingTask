@@ -22,30 +22,12 @@ public class AsyncLogInterfaceTests
             logger.WriteLog(message);
             logger.StopAndFlush();
 
-            // Stop_With_Flush is not currently synchronous; poll until the line lands or we time out.
-            var deadline = DateTime.UtcNow.AddSeconds(5);
-            string? content = null;
-            while (DateTime.UtcNow < deadline)
-            {
-                logDir.Refresh();
-                var newest = logDir.Exists
-                    ? logDir.GetFiles("*.log").OrderByDescending(f => f.CreationTimeUtc).FirstOrDefault()
-                    : null;
+            // StopAndFlush Joins the consumer thread, so the line is on disk by the time it returns.
+            logDir.Refresh();
+            var file = logDir.GetFiles("*.log").Single();
+            var content = ReadAll(file);
 
-                if (newest is not null)
-                {
-                    using var stream = new FileStream(newest.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                    using var reader = new StreamReader(stream);
-                    content = reader.ReadToEnd();
-                    if (content.Contains(message))
-                        break;
-                }
-
-                Thread.Sleep(50);
-            }
-
-            Assert.NotNull(content);
-            Assert.Contains(message, content!);
+            Assert.Contains(message, content);
         }
         finally
         {
@@ -138,10 +120,8 @@ public class AsyncLogInterfaceTests
 
             logger.StopAndFlush();
 
-            // Stop_With_Flush still returns before drain finishes (test #3 territory), so poll
-            // until the file has enough lines to cover every produced message.
-            WaitUntil(() => CountLogLines(logDir) >= totalMessages, TimeSpan.FromSeconds(15));
-
+            // StopAndFlush Joins the consumer thread, so every produced message is on disk
+            // by the time it returns — no polling needed.
             logDir.Refresh();
             var file = logDir.GetFiles("*.log").Single();
             var content = ReadAll(file);
@@ -229,7 +209,94 @@ public class AsyncLogInterfaceTests
             var content = ReadAll(file);
             var actualLines = content.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length - 1;
 
-            Assert.InRange(actualLines, 0, messageCount - 1);
+            // Lower bound is 1, not 0: the consumer must have done *some* work before stopping.
+            // A broken StopAndDiscard that cancels instantly before writing anything should fail.
+            Assert.InRange(actualLines, 1, messageCount - 1);
+        }
+        finally
+        {
+            if (logDir.Exists)
+                Directory.Delete(logDir.FullName, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void WriteLog_AfterStop_SilentlyDrops()
+    {
+        // Locks in current behaviour: writes after Stop are silently dropped (the implementation
+        // checks _lines.IsAddingCompleted and returns). Must not throw, and the dropped message
+        // must not appear in the file.
+        const string preStop = "pre-stop";
+        const string postStop = "post-stop";
+
+        var logDir = new DirectoryInfo(
+            Path.Combine(Path.GetTempPath(), "LogComponentTests_" + Guid.NewGuid().ToString("N")));
+
+        try
+        {
+            var logger = new AsyncLogInterface(logDir.FullName);
+
+            logger.WriteLog(preStop);
+            logger.StopAndFlush();
+
+            // No exception expected.
+            logger.WriteLog(postStop);
+
+            logDir.Refresh();
+            var file = logDir.GetFiles("*.log").Single();
+            var content = ReadAll(file);
+
+            Assert.Contains(preStop, content);
+            Assert.DoesNotContain(postStop, content);
+        }
+        finally
+        {
+            if (logDir.Exists)
+                Directory.Delete(logDir.FullName, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Stop_CalledMultipleTimesInAnyOrder_DoesNotThrow()
+    {
+        // Idempotency check: the Interlocked.Exchange gate must make repeat / mixed-order
+        // stop calls safe. We exercise StopAndFlush twice, then StopAndDiscard, and expect
+        // no exceptions.
+        var logDir = new DirectoryInfo(
+            Path.Combine(Path.GetTempPath(), "LogComponentTests_" + Guid.NewGuid().ToString("N")));
+
+        try
+        {
+            var logger = new AsyncLogInterface(logDir.FullName);
+
+            logger.WriteLog("some line");
+
+            logger.StopAndFlush();
+            logger.StopAndFlush();
+            logger.StopAndDiscard();
+        }
+        finally
+        {
+            if (logDir.Exists)
+                Directory.Delete(logDir.FullName, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Stop_DiscardThenFlush_DoesNotThrow()
+    {
+        // Reverse-order idempotency check: StopAndDiscard first, then StopAndFlush.
+        var logDir = new DirectoryInfo(
+            Path.Combine(Path.GetTempPath(), "LogComponentTests_" + Guid.NewGuid().ToString("N")));
+
+        try
+        {
+            var logger = new AsyncLogInterface(logDir.FullName);
+
+            logger.WriteLog("some line");
+
+            logger.StopAndDiscard();
+            logger.StopAndFlush();
         }
         finally
         {
