@@ -3,7 +3,7 @@ namespace LogTest
 	public interface LogInterface
 	{
 		/// <summary>
-		/// Stop the logging. If any outstadning logs theses will not be written to Log
+		/// Stop the logging. If any outstandning logs theses will not be written to Log
 		/// </summary>
 		void StopAndDiscard();
 

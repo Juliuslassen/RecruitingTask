@@ -4,6 +4,9 @@ A short record of the choices made in this solution and why. Bugs and cleanup
 were pulled in only when an active test exposed them, so each change stays
 explainable on its own.
 
+For things I'd improve with more time on the clock — libraries to reach for,
+legacy code to clean up — see [`IMPROVEMENTS.md`](./IMPROVEMENTS.md).
+
 ## How we worked: test, then fix
 
 Every README requirement was approached the same way: write the failing test
@@ -65,6 +68,7 @@ fix earlier would have meant rewriting the same lines twice.
 | Midnight detection used `(DateTime.Now - _curDate).Days != 0`, which returns `0` for any pair of times less than 24 h apart — so 23:59 → 00:01 silently skipped the rollover | Fixed; check is now `now.Date != _curDate.Date`. Test #2 made the bug observable. |
 | `Stop_With_Flush` returned immediately rather than blocking until drain (call returned with the queue still being consumed) | Fixed; `Stop_With_Flush` now calls `_runThread.Join()` after `CompleteAdding`, so the call returns only once the consumer has drained the queue and exited. Test #3 (`Expected 1000, Actual 118` before the fix) made the bug observable. |
 | `Stop_Without_Flush` returned before the consumer's `finally` had disposed the writer — caller could observe the file mid-shutdown | Fixed; `Stop_Without_Flush` now `Cancel`s the token *and* Joins the worker, so the file is settled when the call returns. The two `Stop_*` methods are now symmetric in shape: signal, then wait. |
+| Demand #4 (error recovery): an exception during a write — disk full, file handle revoked, midnight rollover failing to open a new file — bubbled out of `MainLoop` and killed the consumer thread silently. `WriteLog` kept enqueueing afterwards, so the caller had no signal that logs had stopped reaching disk. | Fixed. The per-line work is now wrapped in `TryProcessLogLine`, which catches and reports failures to `Console.Error` and continues with the next item. `RotateWriterIfDateChanged` was rewritten to open the new writer *before* disposing the old one, so a failed rollover leaves us with the previous working writer rather than a disposed one. |
 
 ## What was deliberately *not* done
 
@@ -73,12 +77,10 @@ fix earlier would have meant rewriting the same lines twice.
 - **No structured logging, levels, sinks, or async write API.** The interface
   is what the README defines; expanding it would conflict with the stated
   contract.
-- **No retry / error-recovery for write failures.** Requirement #4
-  ("application must recover from errors") would be the natural next step.
-  Currently an exception in the consumer's write path (e.g. disk full, file
-  handle revoked) escapes the `try` block and tears the worker thread down
-  silently — `WriteLog` would keep enqueueing successfully and the caller
-  would have no idea writes had stopped. A small fix would be to wrap the
-  per-line write in its own try/catch and continue the loop on failure;
-  reporting the failure back to the caller (event, callback, or a "last
-  error" property) would be the more complete solution.
+- **No structured error reporting to the caller.** Demand #4 is satisfied
+  in the minimal sense — the consumer thread now survives per-line write
+  failures (see bug table) — but the only signal a failure produces is a
+  line on `Console.Error`. A more complete answer would expose failures via
+  an event, callback, or `LastError`-style property so the calling
+  application can react (alert, switch to a fallback sink, etc.). Left out
+  to keep the public `LogInterface` shape unchanged from the README.
