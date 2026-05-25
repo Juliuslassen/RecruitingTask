@@ -105,3 +105,15 @@ scope.
   the bullet above — once failures are exposed as an event or callback,
   the library no longer needs to touch `Console` itself, and the host
   decides where the diagnostic lands.
+
+## Continuous integration
+
+- **No CI pipeline wired up.** The test suite is only run locally today —
+  every push to `main` and every pull request should trigger the full
+  build + test run automatically, so a regression can't slip in unnoticed
+  if a contributor forgets to run `dotnet test`. A minimal **GitHub
+  Actions** workflow at `.github/workflows/ci.yml` running
+  `dotnet test CodeTest.sln` on `ubuntu-latest` against the .NET 10 SDK
+  is ~20 lines. Add a CI-status badge to `README.md` so the state of
+  `main` is visible at a glance, and gate PR merges on the workflow
+  passing.
